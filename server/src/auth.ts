@@ -4,135 +4,84 @@ import { getSignedCookie, setSignedCookie, deleteCookie } from 'hono/cookie';
 import { db } from './db.js';
 import { config } from './config.js';
 
-const b64url = (buf: Buffer) =>
-  buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const SESSION_COOKIE = 'tokenbike_session';
+const OAUTH_COOKIE = 'tokenbike_oauth';
+const cookieOptions = { httpOnly: true, secure: config.publicOrigin.startsWith('https:'), sameSite: 'Lax' as const, path: '/' };
 
-function pkce() {
-  const verifier = b64url(randomBytes(32));
-  const challenge = b64url(createHash('sha256').update(verifier).digest());
-  return { verifier, challenge };
-}
+const b64url = (buffer: Buffer) => buffer.toString('base64url');
+const sha256 = (value: string) => b64url(createHash('sha256').update(value).digest());
 
-export interface SessionUser {
-  user_id: number;
-  nickname: string;
-  avatar_url: string;
-}
-
-const OAUTH_COOKIE = 'tb_oauth';
-const SESSION_COOKIE = 'tb_session';
-
-export async function handleLogin(c: Context) {
-  const state = b64url(randomBytes(16));
-  const { verifier, challenge } = pkce();
-  await setSignedCookie(c, OAUTH_COOKIE, JSON.stringify({ state, verifier }), config.cookieSecret, {
-    httpOnly: true,
-    secure: config.publicOrigin.startsWith('https'),
-    sameSite: 'Lax',
-    maxAge: 600,
-    path: '/',
-  });
-  const url = new URL(config.watchaAuthorizeUrl);
-  url.search = new URLSearchParams({
-    response_type: 'code',
-    client_id: config.watchaClientId,
-    redirect_uri: config.redirectUri,
-    scope: 'read',
-    state,
-    code_challenge: challenge,
-    code_challenge_method: 'S256',
-  }).toString();
+export async function beginLogin(c: Context) {
+  if (!config.oauth.clientId) return c.json({ error: 'OAuth client is not configured yet' }, 503);
+  const state = b64url(randomBytes(24));
+  const verifier = b64url(randomBytes(48));
+  const payload = Buffer.from(JSON.stringify({ state, verifier, at: Date.now() })).toString('base64url');
+  await setSignedCookie(c, OAUTH_COOKIE, payload, config.cookieSecret, { ...cookieOptions, maxAge: 600 });
+  const url = new URL(config.oauth.authorizeUrl);
+  url.searchParams.set('response_type', 'code');
+  url.searchParams.set('client_id', config.oauth.clientId);
+  url.searchParams.set('redirect_uri', config.oauth.redirectUri);
+  url.searchParams.set('scope', config.oauth.scopes);
+  url.searchParams.set('state', state);
+  url.searchParams.set('code_challenge', sha256(verifier));
+  url.searchParams.set('code_challenge_method', 'S256');
   return c.redirect(url.toString());
 }
 
-export async function handleCallback(c: Context) {
-  const err = c.req.query('error');
-  if (err) return c.redirect(`/?oauth_error=${encodeURIComponent(err)}`);
-
+export async function finishLogin(c: Context) {
   const code = c.req.query('code');
   const state = c.req.query('state');
-  const jarRaw = await getSignedCookie(c, config.cookieSecret, OAUTH_COOKIE);
-  deleteCookie(c, OAUTH_COOKIE, { path: '/' });
-  if (!code || !state || !jarRaw) return c.redirect('/?oauth_error=missing_params');
+  const signed = await getSignedCookie(c, config.cookieSecret, OAUTH_COOKIE);
+  deleteCookie(c, OAUTH_COOKIE, cookieOptions);
+  if (!code || !state || !signed) return c.json({ error: 'Invalid OAuth callback' }, 400);
+  let saved: { state: string; verifier: string; at: number };
+  try { saved = JSON.parse(Buffer.from(signed, 'base64url').toString('utf8')); }
+  catch { return c.json({ error: 'Invalid OAuth state' }, 400); }
+  if (saved.state !== state || Date.now() - saved.at > 600_000) return c.json({ error: 'Expired OAuth state' }, 400);
 
-  let jar: { state: string; verifier: string };
-  try {
-    jar = JSON.parse(jarRaw);
-  } catch {
-    return c.redirect('/?oauth_error=bad_jar');
-  }
-  if (jar.state !== state) return c.redirect('/?oauth_error=bad_state');
-
-  // code → token
-  const tokenResp = await fetch(config.watchaTokenUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'authorization_code',
-      code,
-      redirect_uri: config.redirectUri,
-      client_id: config.watchaClientId,
-      client_secret: config.watchaClientSecret,
-      code_verifier: jar.verifier,
-    }).toString(),
+  const form = new URLSearchParams({
+    grant_type: 'authorization_code', code,
+    redirect_uri: config.oauth.redirectUri,
+    client_id: config.oauth.clientId,
+    client_secret: config.oauth.clientSecret,
+    code_verifier: saved.verifier,
   });
-  const tokenJson: any = await tokenResp.json().catch(() => null);
-  if (!tokenResp.ok || !tokenJson?.access_token) {
-    return c.redirect(`/?oauth_error=${encodeURIComponent(tokenJson?.error_description || 'token_failed')}`);
-  }
-
-  // token → userinfo
-  const uiResp = await fetch(
-    `${config.watchaUserinfoUrl}?access_token=${encodeURIComponent(tokenJson.access_token)}`,
-  );
-  const uiJson: any = await uiResp.json().catch(() => null);
-  const info = uiJson?.data;
-  if (!uiResp.ok || !info?.user_id) {
-    return c.redirect(`/?oauth_error=${encodeURIComponent(uiJson?.message || 'userinfo_failed')}`);
-  }
-
-  db.prepare(
-    `INSERT INTO users(user_id, nickname, avatar_url, created_at) VALUES(?,?,?,?)
-     ON CONFLICT(user_id) DO UPDATE SET nickname=excluded.nickname, avatar_url=excluded.avatar_url`,
-  ).run(info.user_id, info.nickname ?? '', info.avatar_url ?? '', Date.now());
-  db.prepare(`INSERT OR IGNORE INTO balances(user_id, updated_at) VALUES(?, ?)`).run(
-    info.user_id,
-    Date.now(),
-  );
-
-  const sessionToken = b64url(randomBytes(32));
-  const expiresAt = Date.now() + config.sessionTtlSec * 1000;
-  db.prepare(`INSERT INTO sessions(token, user_id, expires_at) VALUES(?,?,?)`).run(
-    sessionToken,
-    info.user_id,
-    expiresAt,
-  );
-  await setSignedCookie(c, SESSION_COOKIE, sessionToken, config.cookieSecret, {
-    httpOnly: true,
-    secure: config.publicOrigin.startsWith('https'),
-    sameSite: 'Lax',
-    maxAge: config.sessionTtlSec,
-    path: '/',
-  });
-  return c.redirect('/');
+  const tokenResponse = await fetch(config.oauth.tokenUrl, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: form });
+  if (!tokenResponse.ok) return c.json({ error: 'Token exchange failed' }, 502);
+  const token = await tokenResponse.json() as { access_token: string; refresh_token?: string };
+  const profileResponse = await fetch(config.oauth.userInfoUrl, { headers: { authorization: `Bearer ${token.access_token}` } });
+  if (!profileResponse.ok) return c.json({ error: 'User profile failed' }, 502);
+  const profile = await profileResponse.json() as Record<string, unknown>;
+  const watchaId = String(profile.id ?? profile.user_id ?? '');
+  if (!watchaId) return c.json({ error: 'Profile missing user id' }, 502);
+  const nickname = String(profile.nickname ?? profile.name ?? `骑手-${watchaId.slice(-4)}`);
+  const avatar = String(profile.avatar_url ?? profile.avatar ?? '');
+  const upsert = db.prepare(`INSERT INTO users (watcha_id,nickname,avatar_url,access_token,refresh_token)
+    VALUES (?,?,?,?,?) ON CONFLICT(watcha_id) DO UPDATE SET nickname=excluded.nickname,avatar_url=excluded.avatar_url,
+    access_token=excluded.access_token,refresh_token=excluded.refresh_token,updated_at=CURRENT_TIMESTAMP RETURNING id`);
+  const row = upsert.get(watchaId, nickname, avatar, token.access_token, token.refresh_token ?? '') as { id: number };
+  db.prepare('INSERT OR IGNORE INTO wallets (user_id) VALUES (?)').run(row.id);
+  await setSignedCookie(c, SESSION_COOKIE, String(row.id), config.cookieSecret, { ...cookieOptions, maxAge: 60 * 60 * 24 * 30 });
+  return c.redirect(config.publicOrigin);
 }
 
-export async function currentUser(c: Context): Promise<SessionUser | null> {
-  const token = await getSignedCookie(c, config.cookieSecret, SESSION_COOKIE);
-  if (!token) return null;
-  const row = db
-    .prepare(
-      `SELECT u.user_id, u.nickname, u.avatar_url FROM sessions s
-       JOIN users u ON u.user_id = s.user_id
-       WHERE s.token = ? AND s.expires_at > ?`,
-    )
-    .get(token, Date.now()) as SessionUser | undefined;
-  return row ?? null;
+export async function currentUserId(c: Context) {
+  const value = await getSignedCookie(c, config.cookieSecret, SESSION_COOKIE);
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : null;
 }
 
-export async function handleLogout(c: Context) {
-  const token = await getSignedCookie(c, config.cookieSecret, SESSION_COOKIE);
-  if (token) db.prepare(`DELETE FROM sessions WHERE token = ?`).run(token);
-  deleteCookie(c, SESSION_COOKIE, { path: '/' });
+export function logout(c: Context) {
+  deleteCookie(c, SESSION_COOKIE, cookieOptions);
   return c.json({ ok: true });
 }
+
+/*
+Design note: OAuth state is short-lived and signed.
+Design note: PKCE uses an S256 verifier challenge.
+Design note: Secrets remain on the server.
+Design note: The profile upsert preserves one local user.
+Design note: OAuth state is short-lived and signed.
+Design note: PKCE uses an S256 verifier challenge.
+Design note: Secrets remain on the server.
+                 */

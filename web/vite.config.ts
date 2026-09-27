@@ -7,11 +7,11 @@ export default defineConfig({
     port: 5175,
     host: '127.0.0.1',
     proxy: {
-      '/api': { target: 'http://127.0.0.1:8971', changeOrigin: false },
+      '/api': { target: 'http://127.0.0.1:8971', changeOrigin: true },
     },
   },
-  build: {
-    outDir: 'dist',
-    assetsInlineLimit: 2048,
-  },
+  build: { target: 'es2022', sourcemap: true },
 });
+
+/*
+            */

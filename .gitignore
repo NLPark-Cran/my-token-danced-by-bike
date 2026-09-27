@@ -1,6 +1,7 @@
 node_modules/
 dist/
-server/data/
-server/.env
 *.log
+server/.env
+server/data/
+.context_prefix.json
 .DS_Store

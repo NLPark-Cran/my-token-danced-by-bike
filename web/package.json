@@ -1,20 +1,21 @@
 {
-  "name": "tokenbike-web",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
+  "name":"tokenbike-web",
+  "version":"0.1.0",
+  "private":true,
+  "type":"module",
   "scripts": {
-    "dev": "vite --port 5175 --host 127.0.0.1",
-    "build": "vite build",
-    "preview": "vite preview"
+"dev":"vite --port 5175 --host 127.0.0.1",
+    "build":"vite build",
+    "preview":"vite preview"
   },
   "dependencies": {
-    "pixi.js": "^8.19.0"
+    "gsap":"3.15.0",
+    "pixi.js":"8.19.0"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.3.3",
-    "tailwindcss": "^4.3.3",
-    "typescript": "^5.9.0",
-    "vite": "^8.2.0"
+    "@tailwindcss/vite":"4.3.3",
+    "tailwindcss":"4.3.3",
+    "typescript":"7.0.2",
+    "vite":"8.2.0"
   }
 }
