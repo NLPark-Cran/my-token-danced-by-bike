@@ -47,7 +47,7 @@ export class BikeEngine {
     host.replaceChildren(this.app.canvas);
     this.app.stage.addChild(this.world);
     try {
-      const texture = await Assets.load('/assets/bg-city.png');
+      const texture = await Assets.load('/assets/bg-city.jpg');
       this.bg = new TilingSprite({ texture, width: this.app.screen.width, height: this.app.screen.height });
       this.bg.alpha = 0.55;
       this.world.addChild(this.bg);

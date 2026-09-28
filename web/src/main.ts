@@ -69,7 +69,7 @@ app.innerHTML = `
       </section>
 
       <footer class="text-center text-xs text-slate-500">
-        观猹 FDE 共学营出品 · 本游戏仅生产虚拟词元，TokenDance 额度概不兑现 · 被马路打了请自行揉脸
+        本游戏仅生产虚拟词元，TokenDance 额度概不兑现 · 被马路打了请自行揉脸
       </footer>
     </main>
   </div>
@@ -206,7 +206,7 @@ function scheduleShenanigans() {
   setTimeout(() => {
     if (Math.random() < 0.3) {
       engine.slap(0.4 + Math.random() * 0.4);
-      popupImg('/assets/meme-slap.png');
+      popupImg('/assets/meme-slap.jpg');
       taunt(SLAP_TAUNTS[Math.floor(Math.random() * SLAP_TAUNTS.length)], 5200);
     } else {
       taunt(TAUNTS[Math.floor(Math.random() * TAUNTS.length)]);
